@@ -2,7 +2,9 @@
 
 ########## IMPORTS AND SETTINGS
 from pyspark.sql import SparkSession
-import pyspark.pandas as ps
+from pyspark.sql import functions as ps_func
+from pyspark.sql import types as ps_types
+import pandas as pd
 spark = SparkSession.builder.appName('make_travel_data').getOrCreate()
 spark.sparkContext.setLogLevel('ERROR')
 
@@ -13,62 +15,137 @@ class TravelData:
 
     def __init__(self, file_addr: str):
 
-        # Define data slots
+        # Define file source and status log
         self.file_addr = file_addr
-        self.region, self.state = None, None
-        self.trip, self.segment = None, None
-        self.msa = None
-        self.noon_temp, self.dusk_temp = None, None
-
-        # Define status log
-        self.status = {
-            'import_raw_data': False, 'refine_area_data': False,
-            'refine_msa_data': False, 'refine_weather_data': False,
-            }
+        self.status = {'import_data': False, 'refine_place_data': False}
 
     def __str__(self) -> str:
         return 'TODO: WRITE THIS FUNCTION'
     
-    def import_raw_data(self):
+    def import_data(self) -> None:
         '''Import raw-ish data from the source spreadsheet'''
 
-        # temporary
-        x = ps.read_excel(
-            io=self.file_addr, sheet_name=None, dtype=str, engine='openpyxl')
-        print('[TABS]=========: ', x.keys())
+        def ReadExcel(dtype, sheet_name:str, file_addr:str=self.file_addr):
+            '''make reusable excel-reader function'''
+            data_file = pd.read_excel(
+                io=file_addr, sheet_name=sheet_name, engine='openpyxl', usecols=dtype)
+            return spark.createDataFrame(data_file)
 
         # Import geographic area data tables
-        self.region = ps.read_excel(
-            io=self.file_addr, sheet_name='region', dtype=str, engine='openpyxl')
-        self.state = ps.read_excel(
-            io=self.file_addr, sheet_name='state', dtype=str, engine='openpyxl')
+        dtype = {'region_id':str, 'region_name':str, 'is_contiguous':int}
+        self.region = ReadExcel(dtype=dtype, sheet_name='area_region')
+
+        dtype = {'state_id':str, 'region_id':str, 'state_name':str, 'statehood':int,
+                 'is_state':int, 'capital_msa':str}
+        self.state = ReadExcel(dtype=dtype, sheet_name='area_state') 
+
+        # Import msa data tables
+        dtype = {'msa_id':str, 'state_id':str, 'msa_name':str, 'is_goal':int,
+                 'mega_city':str,'state_capital':str, 'state_largest':int, 'special_interest':str,
+                 'population':int} 
+        self.msa = ReadExcel(dtype=dtype, sheet_name='msa_roster')
+
+        dtype = {'msa_id':str, 'state_id':str, 'miles_walked':float,
+                 'photo_count':int, 'photo_latest':str}
+        self.msa_visit = ReadExcel(dtype=dtype, sheet_name='msa_visit')
+
+        dtype = {'msa_id':str, 'state_id':str, 'longitude':float, 'latitude':float}
+        self.msa_lonlat = ReadExcel(dtype=dtype, sheet_name='msa_lonlat')
 
         # Import trip data tables
-        self.trip = ps.read_excel(
-            io = self.file_addr, sheet_name='trips', dtype=str, engine='openpyxl')
-        self.segment = ps.read_excel(
-            io = self.file_addr, sheet_name='segmentsTODO', dtype=str, engine='openpyxl')
-        
-        # Import msa data tables - travels, goals, coordinates
-        # TODO
+        dtype = {'trip_id':str, 'trip_name':str, 'trip_start':str, 'trip_end':str}
+        self.trip = ReadExcel(dtype=dtype, sheet_name='trip_roster')
+
+        dtype = {'trip_id':str, 'segment_id':str, 'msa_start':str, 'msa_end':str, 'alt_lon':float,
+                 'alt_lat':float, 'alt_name':str}
+        self.trip_route = ReadExcel(dtype=dtype, sheet_name='trip_route')
+
+        dtype = {'trip_id':str, 'msa_id':str}
+        self.trip_visit = ReadExcel(dtype=dtype, sheet_name='trip_visit')
 
         # Import weather data tables
-        self.noon_temp = ps.read_excel(
-            io=self.file_addr, sheet_name='msa_temp_noon', dtype=str)
-        self.dusk_temp = ps.read_excel(
-            io=self.file_addr, sheet_name='msa_temp_dusk', dtype=str)
+        months = {i:float for i in [
+            'jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']}
+        dtype = {'msa_id':str, 'state_id':str}.update(months)
+        self.weather_noon = ReadExcel(dtype=dtype, sheet_name='weather_noon')
+        self.weather_dusk = ReadExcel(dtype=dtype, sheet_name='weather_dusk')
+
+        # Update status log
+        self.status['import_data'] = True
+
+        return None
+    
+    def refine_place_data(self) -> None:
+        '''Refine all imported data tables'''
+
+        # confirm previous step executed
+        assert self.status['import_data'], 'ERROR: Execute .import_data() first'
+
+        ## REFINE GEOGRAPHIC AREA DATA
+        # self.region - no refinement needed
+
+        # self.state - nullify -1 statehood values
+        self.state = self.state.withColumn('statehood',
+            ps_func.when(self.state['statehood'] == -1, None).otherwise(self.state['statehood']))
         
-        print(self.state)
+        ## REFINE MSA DATA
+        # self.msa - convert nulls to empty strings for goal inclusion criteria
+        for i in ['mega_city', 'state_capital', 'state_largest', 'special_interest']:
+            self.msa = self.msa.withColumn(
+                i, ps_func.when(self.msa[i]=='nan', '').otherwise(self.msa[i]))
+            
+        # merge datasets into msa with a reusuable function
+        for i in [('msa_visit', 'photo_count'), ('msa_lonlat', 'longitude')]:
+            self.msa = self.msa.join(getattr(self, i[0]), on=['msa_id','state_id'], how='left')
+            self.msa = self.msa.withColumn(
+                i[0], ps_func.when(self.msa[i[1]].isNull(), 0).otherwise(1))
+            
+        # warn if any goal msa are are missing coordinate data
+        self.msa = self.msa.withColumn(
+            'missing_lonlat', (1 - ps_func.col('msa_lonlat')) * ps_func.col('is_goal')
+        )
+        missing_lonlat = self.msa.agg(ps_func.sum('missing_lonlat')).collect()[0][0]
+        if missing_lonlat > 0:
+            print(f'WARNING: {missing_lonlat} goal MSAs are missing coordinate data')
+            self.msa.filter(self.msa['missing_lonlat'] == 1).select('msa_id').show(truncate=2**4)
+        self.msa = self.msa.drop('missing_lonlat').drop('msa_lonlat')
+
+        # Update status log
+        self.status['refine_place_data'] = True
+        return None
+    
+    def refine_trip_data(self) -> None:
+        '''Refine trip data'''
+        print('TODO: WRITE THIS FUNCTION')
+        return None
+    
+    def refine_weather_data(self) -> None:
+        '''Refine weather data'''
+        print('TODO: WRITE THIS FUNCTION')
+        return None
+    
+    def show_data(self) -> None:
+        # print values as needed
+        self.msa.show(20, truncate=16)
+        print(type(self))
+        self.msa.printSchema()
         return None
 
-########## DEFINE MAIN EXECUTION FUNCTION
+    def make_travel_data(self):
+        '''Import and refine all travel data'''
+        self.import_data()
+        self.refine_place_data()
+        self.show_data()
+        self.refine_trip_data()
+        self.refine_weather_data()
+
 
 ########## TEST EXECUTION
 if __name__ == '__main__':
     spark.sparkContext.setLogLevel('ERROR')
-    travel_data = TravelData('a_in/us_travels.xlsx')
-    travel_data.import_raw_data()
+    travel_data = TravelData('a_in/us_travels.xlsx').make_travel_data()
     spark.stop()
 
-##########==========##########==========##########==========##########==========
-##########==========##########==========##########==========##########==========
+
+##########==========##########==========##########==========##########==========##########==========
+##########==========##########==========##########==========##########==========##########==========
