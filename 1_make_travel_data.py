@@ -18,6 +18,7 @@ class TravelData:
         # Define file source and status log
         self.file_addr = file_addr
         self.status = {'import_data': False, 'refine_place_data': False}
+        self.months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
 
     def __str__(self) -> str:
         return 'TODO: WRITE THIS FUNCTION'
@@ -64,9 +65,9 @@ class TravelData:
         self.trip_visit = ReadExcel(dtype=dtype, sheet_name='trip_visit')
 
         # Import weather data tables
-        months = {i:float for i in [
-            'jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']}
-        dtype = {'msa_id':str, 'state_id':str}.update(months)
+        months = {i:float for i in self.months}
+        dtype = {'msa_id':str, 'state_id':str}
+        dtype.update(months)
         self.weather_noon = ReadExcel(dtype=dtype, sheet_name='weather_noon')
         self.weather_dusk = ReadExcel(dtype=dtype, sheet_name='weather_dusk')
 
@@ -113,31 +114,49 @@ class TravelData:
         # Update status log
         self.status['refine_place_data'] = True
         return None
+
+    def refine_weather_data(self) -> None:
+        '''Refine weather data'''
+
+        # merge weather data tables
+        self.weather_dusk = self.weather_dusk.melt(
+            ids=['msa_id', 'state_id'], values=self.months, variableColumnName='month', valueColumnName='weather_dusk')
+        self.weather_noon = self.weather_noon.melt(
+            ids=['msa_id', 'state_id'], values=self.months, variableColumnName='month', valueColumnName='weather_noon')
+        self.weather = self.weather_dusk.join(self.weather_noon, on=['msa_id','state_id','month'], how='outer')
+        self.weather_noon, self.weather_dusk = None, None
+
+        # make weather data relative to ideal condition
+        self.weather = self.weather.withColumn(
+            'weather_dusk', ps_func.least(ps_func.round(ps_func.col('weather_dusk') - 50.0, 1), ps_func.lit(0.0)))
+        self.weather = self.weather.withColumn(
+            'weather_noon', ps_func.least(ps_func.round(75.0 - ps_func.col('weather_noon'), 1), ps_func.lit(0.0)))
+        self.weather = self.weather.withColumn('weather', ps_func.col('weather_dusk') + ps_func.col('weather_noon'))
+
+        return None
     
     def refine_trip_data(self) -> None:
         '''Refine trip data'''
         print('TODO: WRITE THIS FUNCTION')
         return None
     
-    def refine_weather_data(self) -> None:
-        '''Refine weather data'''
-        print('TODO: WRITE THIS FUNCTION')
-        return None
+
     
     def show_data(self) -> None:
         # print values as needed
-        self.msa.show(20, truncate=16)
-        print(type(self))
-        self.msa.printSchema()
+        self.weather.sort('weather', ascending=False).show(20, truncate=16)
+        print(self.weather.count())
+        self.weather.printSchema()
+        self.weather.filter(self.weather['msa_id']=='Washington DC').sort('weather').show()
         return None
 
     def make_travel_data(self):
         '''Import and refine all travel data'''
         self.import_data()
         self.refine_place_data()
-        self.show_data()
         self.refine_trip_data()
         self.refine_weather_data()
+        self.show_data()
 
 
 ########## TEST EXECUTION
@@ -147,5 +166,5 @@ if __name__ == '__main__':
     spark.stop()
 
 
-##########==========##########==========##########==========##########==========##########==========
-##########==========##########==========##########==========##########==========##########==========
+##########==========##########==========##########==========##########==========##########==========##########==========
+##########==========##########==========##########==========##########==========##########==========##########==========

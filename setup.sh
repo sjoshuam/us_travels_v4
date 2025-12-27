@@ -8,7 +8,6 @@ sudo apt-get update
 sudo apt-get upgrade -y
 
 # Install Java 21
-sudo apt-get install -y default-jdk # development kit
 sudo apt-get install -y openjdk-21-jdk
 
 # install Python 3.12
