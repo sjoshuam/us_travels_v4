@@ -33,7 +33,7 @@ class MainDataset:
         '''Read and clean MSA Roster tab'''
         msa_roster = pd.read_excel(self.file_path, sheet_name='msa_roster')
         for i in ['mega_city', 'state_capital', 'state_largest']:
-                  msa_roster[i] = msa_roster[i].isna()
+                  msa_roster[i] = msa_roster[i].notna()
         msa_roster['is_goal'] = msa_roster['is_goal'].astype(bool)
         self.msa_roster = msa_roster
         return self
@@ -126,26 +126,29 @@ class MainDataset:
         print('\n---- MSA QA Statistics ----')
         print(qa_statistics)
         del msa_data
-        return self.msa_data
-
-
-
-    ## TODO: state, region summaries
-
-
-
-    def display_stuff(self):
-        '''Temporarily display useful info'''
-        print(self.msa_data.T.head(10))
-        #print(self.area_region)
-        #print(self.area_state)
-        #print(self.msa_roster)
-        #print(self.msa_visit)
-        #print(self.msa_lonlat)
-        #print(self.weather_noon)
-        #print(self.weather_dusk)
-        #print(self.weather_score)
-        return None
+        return self
+    
+    def compile_state_data(self):
+        '''Aggregate MSA data to the state level'''
+        state_data = self.msa_data.groupby('state_id').agg({
+            'mega_city': lambda x: x.sum(), 'population': 'sum', 'msa_name': len, 'elevation': 'max',
+            'photo_latest': lambda x: x[x.notna()].max(), 'is_visited': 'sum', 'is_legacy': 'sum',
+        }).rename(columns={'msa_name':'msa_total', 'mega_city':'msa_large', 
+            'population':'msa_population', 'elevation':'msa_max_elevation',
+            'is_visited':'msa_visited', 'is_legacy':'msa_legacy', 'photo_latest': 'msa_latest',
+            })
+        state_data = state_data.assign(
+            msa_pictured = state_data['msa_visited'] - state_data['msa_legacy'])
+        self.area_state = self.area_state.merge(state_data, on='state_id', how='left')
+        self.area_state['msa_pop_pct'] = self.area_state['msa_population'] \
+            / self.area_state['metro_population']
+        del state_data
+        return self
+    
+    def compile_data(self):
+        self.compile_msa_data()
+        self.compile_state_data()
+        return self
         
 
 ##########==========##########==========##########==========##########==========##########==========
@@ -156,12 +159,8 @@ class MainDataset:
 if __name__ == "__main__":
     main_dataset = MainDataset()
     main_dataset.read_data()
-
     main_dataset.score_weather()
-
-    main_dataset.compile_msa_data()
-
-    main_dataset.display_stuff()
+    main_dataset.compile_data()
 
 
 ##########==========##########==========##########==========##########==========##########==========
