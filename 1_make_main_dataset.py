@@ -92,26 +92,41 @@ class MainDataset:
     def compile_msa_data(self):
         '''Compile all MSA data into a single dataframe'''
 
-        ## Retain only MSAs that are roadtrip goals
+        ## Create QA tracking object
+        qa_statistics = {'MSA': self.msa_roster.shape[0]} # 387 MSA + 7 rural caps + San Juan = 395
+
+        ## Retain only MSAs that are roadtrip goals (and do QA checks)
         msa_data = self.msa_roster.loc[self.msa_roster['is_goal']].copy()
+        msa_data = msa_data.drop(columns='is_goal').sort_values(['state_id', 'msa_id'])
+        assert msa_data.drop_duplicates().shape[0] == msa_data.shape[0], 'Duplicates detected'
+        qa_statistics.update({'Goal':msa_data.shape[0]})
         del self.msa_roster
 
         ## Merge in coordinate and elevation data
         msa_data = msa_data.merge(self.msa_lonlat, on=['state_id', 'msa_id'], how='left')
+        qa_statistics.update({'Coord': sum(msa_data['longitude'].notna())})
         del self.msa_lonlat
 
         ## Merge in data for visited MSAs
         msa_data = msa_data.merge(self.msa_visit, on=['state_id', 'msa_id'], how='left')
         msa_data = msa_data.assign(is_visited=msa_data['is_legacy'].notna())
         msa_data = msa_data.assign(is_legacy=msa_data['is_legacy'].fillna(0).astype(bool))
+        qa_statistics.update({ 'Visited':sum(msa_data['is_legacy']) })
+        qa_statistics.update({ 'Pictured':sum(msa_data['photo_latest'].notna()) })
+        qa_statistics.update({ 'Visited':sum([qa_statistics[i] for i in ['Visited', 'Pictured']]) })
         del self.msa_visit
 
-        print(msa_data.head(5).T)
-        print('\n---- Statistics ----')
-        print('Total MSA:', msa_data.shape[0])
-        print('MSA Coordinates:', msa_data['longitude'].notna().sum())
-        print('Visited MSA:', msa_data['is_visited'].sum())
-        print('Pictured MSA:', msa_data['photo_latest'].notna().sum())
+        ## Add in regional id foreign key, sort columns
+        msa_data = msa_data.merge(self.area_state[['state_id', 'region_id']], how='left', on='state_id')
+        msa_data = msa_data.sort_values(['state_id', 'msa_id'])
+        qa_statistics.update({ 'Final': msa_data.shape[0] })
+        self.msa_data = msa_data
+        
+        ## display qa statistics
+        print('\n---- MSA QA Statistics ----')
+        print(qa_statistics)
+        del msa_data
+        return self.msa_data
 
 
 
@@ -121,6 +136,7 @@ class MainDataset:
 
     def display_stuff(self):
         '''Temporarily display useful info'''
+        print(self.msa_data.T.head(10))
         #print(self.area_region)
         #print(self.area_state)
         #print(self.msa_roster)
